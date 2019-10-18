@@ -27,13 +27,21 @@ open class SwiftyCamViewController: UIViewController {
 
 	/// Enumeration for Camera Selection
 
-    public enum CameraSelection: String {
-
+    public enum CameraSelection: Equatable {
 		/// Camera on the back of the device
-		case rear = "rear"
-
+		case rear(AVCaptureDevice.DeviceType)
 		/// Camera on the front of the device
-		case front = "front"
+		case front(AVCaptureDevice.DeviceType)
+
+        public static func ==(lhs: CameraSelection, rhs: CameraSelection) -> Bool {
+            switch (lhs, rhs) {
+            case let (.front(ldt), .front(rdt)),
+                 let (.rear(ldt), .rear(rdt)):
+                return ldt == rdt
+            default:
+                return false
+            }
+        }
 	}
     
     public enum FlashMode{
@@ -170,7 +178,7 @@ open class SwiftyCamViewController: UIViewController {
 
 	/// Set default launch camera
 
-	public var defaultCamera                   = CameraSelection.rear
+	public var defaultCamera                   = CameraSelection.rear(AVCaptureDevice.DeviceType.builtInWideAngleCamera)
 
 	/// Sets wether the taken photo or video should be oriented according to the device orientation
 
@@ -217,7 +225,11 @@ open class SwiftyCamViewController: UIViewController {
 
 	/// Returns the CameraSelection corresponding to the currently utilized camera
 
-	private(set) public var currentCamera        = CameraSelection.rear
+	private(set) public var currentCamera        = CameraSelection.rear(AVCaptureDevice.DeviceType.builtInWideAngleCamera)
+
+    /// Returns the previously working CameraSelection, used mainly for error recovery
+
+    private(set) public var previousCamera       = CameraSelection.rear(AVCaptureDevice.DeviceType.builtInWideAngleCamera)
 
 	// MARK: Private Constant Declarations
 
@@ -518,16 +530,20 @@ open class SwiftyCamViewController: UIViewController {
 			return
 		}
 
-		if currentCamera == .rear && flashMode == .on {
-			enableFlash()
-		}
-
-		if currentCamera == .front && flashMode == .on  {
-			flashView = UIView(frame: view.frame)
-			flashView?.backgroundColor = UIColor.white
-			flashView?.alpha = 0.85
-			previewLayer.addSubview(flashView!)
-		}
+        if case .rear(_) = currentCamera {
+            if flashMode == .on {
+                enableFlash()
+            }
+        }
+    
+        if case .front(_) = currentCamera {
+            if flashMode == .on {
+                flashView = UIView(frame: view.frame)
+                flashView?.backgroundColor = UIColor.white
+                flashView?.alpha = 0.85
+                previewLayer.addSubview(flashView!)
+            }
+        }
 
         //Must be fetched before on main thread
         let previewOrientation = previewLayer.videoPreviewLayer.connection!.videoOrientation
@@ -543,7 +559,7 @@ open class SwiftyCamViewController: UIViewController {
 
 
 				//flip video output if front facing camera is selected
-				if self.currentCamera == .front {
+                if case .front(_) = self.currentCamera {
 					movieFileOutputConnection?.isVideoMirrored = true
 				}
 
@@ -580,14 +596,17 @@ open class SwiftyCamViewController: UIViewController {
 			movieFileOutput!.stopRecording()
 			disableFlash()
 
-			if currentCamera == .front && flashMode == .on && flashView != nil {
-				UIView.animate(withDuration: 0.1, delay: 0.0, options: .curveEaseInOut, animations: {
-					self.flashView?.alpha = 0.0
-				}, completion: { (_) in
-					self.flashView?.removeFromSuperview()
-				})
-			}
-			DispatchQueue.main.async {
+            if case .front(_) = currentCamera {
+                if flashMode == .on && flashView != nil {
+                    UIView.animate(withDuration: 0.1, delay: 0.0, options: .curveEaseInOut, animations: {
+                        self.flashView?.alpha = 0.0
+                    }, completion: { (_) in
+                        self.flashView?.removeFromSuperview()
+                    })
+                }
+            }
+
+            DispatchQueue.main.async {
 				self.cameraDelegate?.swiftyCam(self, didFinishRecordingVideo: self.currentCamera)
 			}
 		}
@@ -602,7 +621,7 @@ open class SwiftyCamViewController: UIViewController {
 	*/
 
 
-	public func switchCamera() {
+	public func switchCamera(to camera: CameraSelection? = nil) {
 		guard isVideoRecording != true else {
 			//TODO: Look into switching camera during video recording
 			print("[SwiftyCam]: Switching between cameras while recording video is not supported")
@@ -613,12 +632,16 @@ open class SwiftyCamViewController: UIViewController {
             return
         }
 
-		switch currentCamera {
-		case .front:
-			currentCamera = .rear
-		case .rear:
-			currentCamera = .front
-		}
+        if let selectedCamera = camera {
+            currentCamera = selectedCamera
+        } else {
+            switch currentCamera {
+            case .front(let deviceType):
+                currentCamera = .rear(deviceType)
+            case .rear(let deviceType):
+                currentCamera = .front(deviceType)
+            }
+        }
 
 		session.stopRunning()
 
@@ -683,7 +706,7 @@ open class SwiftyCamViewController: UIViewController {
 	/// Configure image quality preset
 
 	fileprivate func configureVideoPreset() {
-		if currentCamera == .front {
+		if case .front = currentCamera {
 			session.sessionPreset = AVCaptureSession.Preset(rawValue: videoInputPresetFromVideoQuality(quality: .high))
 		} else {
 			if session.canSetSessionPreset(AVCaptureSession.Preset(rawValue: videoInputPresetFromVideoQuality(quality: videoQuality))) {
@@ -698,11 +721,19 @@ open class SwiftyCamViewController: UIViewController {
 
 	fileprivate func addVideoInput() {
 		switch currentCamera {
-		case .front:
-			videoDevice = SwiftyCamViewController.deviceWithMediaType(AVMediaType.video.rawValue, preferringPosition: .front)
-		case .rear:
-			videoDevice = SwiftyCamViewController.deviceWithMediaType(AVMediaType.video.rawValue, preferringPosition: .back)
+		case .front(let deviceType):
+			videoDevice = SwiftyCamViewController.deviceWithMediaType(AVMediaType.video.rawValue, ofType: deviceType, preferringPosition: .front)
+		case .rear(let deviceType):
+			videoDevice = SwiftyCamViewController.deviceWithMediaType(AVMediaType.video.rawValue, ofType: deviceType, preferringPosition: .back)
 		}
+
+        guard videoDevice != nil else {
+            if self.currentCamera != self.previousCamera {
+                self.currentCamera = self.previousCamera
+                addVideoInput()
+            }
+            return
+        }
 
 		if let device = videoDevice {
 			do {
@@ -746,7 +777,9 @@ open class SwiftyCamViewController: UIViewController {
                     return
                 }
             }
-			
+
+            // update previous camera information with new initialized camera
+            self.previousCamera = self.currentCamera
 		} catch {
 			print("[SwiftyCam]: Could not create video device input: \(error)")
 			setupResult = .configurationFailed
@@ -918,9 +951,9 @@ open class SwiftyCamViewController: UIViewController {
 
 	/// Get Devices
 
-	fileprivate class func deviceWithMediaType(_ mediaType: String, preferringPosition position: AVCaptureDevice.Position) -> AVCaptureDevice? {
+	fileprivate class func deviceWithMediaType(_ mediaType: String, ofType deviceType: AVCaptureDevice.DeviceType, preferringPosition position: AVCaptureDevice.Position) -> AVCaptureDevice? {
 		if #available(iOS 10.0, *) {
-				let avDevice = AVCaptureDevice.default(AVCaptureDevice.DeviceType.builtInWideAngleCamera, for: AVMediaType(rawValue: mediaType), position: position)
+				let avDevice = AVCaptureDevice.default(deviceType, for: AVMediaType(rawValue: mediaType), position: position)
 				return avDevice
 		} else {
 				// Fallback on earlier versions
@@ -972,7 +1005,7 @@ fileprivate func changeFlashSettings(device: AVCaptureDevice, mode: FlashMode) {
 	/// Toggles between enabling and disabling flash
 
 	fileprivate func toggleFlash() {
-		guard self.currentCamera == .rear else {
+        guard case .rear = self.currentCamera else {
 			// Flash is not supported for front facing camera
 			return
 		}
@@ -1118,11 +1151,14 @@ extension SwiftyCamViewController {
 	/// Handle pinch gesture
 
 	@objc fileprivate func zoomGesture(pinch: UIPinchGestureRecognizer) {
-		guard pinchToZoom == true && self.currentCamera == .rear else {
-			//ignore pinch
-			return
-		}
-		do {
+        if case .rear(_) = self.currentCamera {
+            guard pinchToZoom == true else {
+                //ignore pinch
+                return
+            }
+        }
+
+        do {
 			let captureDevice = AVCaptureDevice.devices().first
 			try captureDevice?.lockForConfiguration()
 
@@ -1190,10 +1226,13 @@ extension SwiftyCamViewController {
 
     @objc private func panGesture(pan: UIPanGestureRecognizer) {
 
-        guard swipeToZoom == true && self.currentCamera == .rear else {
-            //ignore pan
-            return
+        if case .rear(_) = self.currentCamera {
+            guard swipeToZoom == true else {
+                //ignore pan
+                return
+            }
         }
+
         let currentTranslation    = pan.translation(in: view).y
         let translationDifference = currentTranslation - previousPanTranslation
 
@@ -1257,7 +1296,6 @@ extension SwiftyCamViewController {
         previewLayer.addGestureRecognizer(panGesture)
 	}
 }
-
 
 // MARK: UIGestureRecognizerDelegate
 

@@ -46,17 +46,35 @@ class Orientation  {
     }
     
     func getImageOrientation(forCamera: SwiftyCamViewController.CameraSelection) -> UIImage.Orientation {
-        guard shouldUseDeviceOrientation, let deviceOrientation = self.deviceOrientation else { return forCamera == .rear ? .right : .leftMirrored }
+        guard shouldUseDeviceOrientation, let deviceOrientation = self.deviceOrientation else {
+            if case .rear(_) = forCamera {
+                return .right
+            }
+            return .leftMirrored
+        }
         
-        switch deviceOrientation {
-        case .landscapeLeft:
-            return forCamera == .rear ? .up : .downMirrored
-        case .landscapeRight:
-            return forCamera == .rear ? .down : .upMirrored
-        case .portraitUpsideDown:
-            return forCamera == .rear ? .left : .rightMirrored
-        default:
-            return forCamera == .rear ? .right : .leftMirrored
+        if case .rear(_) = forCamera {
+            switch deviceOrientation {
+            case .landscapeLeft:
+                return .up
+            case .landscapeRight:
+                return .down
+            case .portraitUpsideDown:
+                return .left
+            default:
+                return .right
+            }
+        } else {
+            switch deviceOrientation {
+            case .landscapeLeft:
+                return .downMirrored
+            case .landscapeRight:
+                return .upMirrored
+            case .portraitUpsideDown:
+                return .rightMirrored
+            default:
+                return .leftMirrored
+            }
         }
     }
     
